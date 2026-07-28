@@ -1,0 +1,513 @@
+---
+title: "Statistical Analysis"
+output:
+  github_document:
+    toc: true
+    html_preview: false
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  echo    = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width  = 7,
+  fig.height = 5,
+  dpi = 300
+)
+```
+
+```{r packages}
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(ggpmisc)
+library(scales)
+library(lme4)
+library(lmerTest)
+library(emmeans)
+library(DHARMa)
+library(performance)
+library(magick)
+```
+
+# The Data
+
+```{r load-data}
+data.dir <- "."
+fig.dir  <- file.path(data.dir, "Figures")
+dir.create(fig.dir, showWarnings = FALSE)
+
+data <- read.delim(file.path(data.dir, "data_paired_raw.txt")) %>%
+  mutate(
+    ID          = factor(ID),
+    type        = factor(type, levels = c("filter", "tissue")),
+    temperature = factor(temperature, levels = c("room", "fridge")),
+    time.hours  = as.numeric(time),
+    log.conc    = log10(concentration)
+  )
+
+data.filter <- read.delim(file.path(data.dir, "data_filter.txt")) %>%
+  mutate(
+    ID          = factor(ID),
+    temperature = factor(temperature, levels = c("room", "fridge")),
+    time.hours  = as.numeric(time),
+    labels      = factor(labels)
+  )
+```
+
+# Descriptive Statistics
+
+```{r descriptives-by-cell}
+data %>%
+  group_by(type, time.hours, temperature) %>%
+  summarise(
+    n    = n(),
+    Mean = round(mean(concentration), 1),
+    SD   = round(sd(concentration), 1),
+    .groups = "drop"
+  ) %>%
+  arrange(type, desc(time.hours)) %>%
+  knitr::kable(
+    col.names = c("Type", "Time (h)", "Temp", "n", "Mean", "SD"),
+    caption   = "DNA concentration (ng/uL) by group"
+  )
+```
+
+```{r descriptives-overall}
+data %>%
+  group_by(type) %>%
+  summarise(
+    Min      = round(min(concentration), 2),
+    Max      = round(max(concentration), 1),
+    Below.1  = sum(concentration <  1),
+    Below.10 = sum(concentration < 10),
+    .groups  = "drop"
+  )
+```
+
+# Analysis 1: Linear Mixed Model
+
+```{r lmm-fit}
+model <- lmer(
+  log.conc ~ type * time.hours +
+             type * temperature +
+             time.hours:temperature +
+             (1 | ID),
+  data = data,
+  REML = TRUE
+)
+
+anova(model, ddf = "Kenward-Roger")
+summary(model)
+r2_nakagawa(model)
+```
+
+## Diagnostics
+
+```{r lmm-diagnostics, fig.width = 8, fig.height = 5}
+sim <- simulateResiduals(model, n = 1000)
+plot(sim)
+
+png(
+  file.path(fig.dir, "Diagnostic_DHARMa.png"),
+  width = 8, height = 5, units = "in", res = 300
+)
+plot(sim)
+dev.off()
+
+cairo_pdf(
+  file.path(fig.dir, "Diagnostic_DHARMa.pdf"),
+  width = 8, height = 5
+)
+plot(sim)
+dev.off()
+
+shapiro.test(residuals(model))
+testUniformity(sim)
+testDispersion(sim)
+```
+
+## Post-Hoc: Filter vs Tissue
+
+```{r posthoc-type}
+contrast.results <- pairs(emmeans(model, ~ type))
+contrast.results
+
+fold.change <- round(10 ^ abs(as.data.frame(contrast.results)$estimate), 1)
+paste0("Tissue yields ~", fold.change, "x more DNA than filter (geometric mean ratio)")
+```
+
+## Post-Hoc: Time Point Comparisons
+
+```{r posthoc-time}
+data$time.factor <- factor(data$time.hours)
+
+model.time <- lmer(
+  log.conc ~ type * time.factor +
+             type * temperature +
+             (1 | ID),
+  data = data,
+  REML = TRUE
+)
+
+anova(model.time, ddf = "Kenward-Roger")
+
+emm.time <- emmeans(model.time, ~ time.factor)
+emm.time
+pairs(emm.time, adjust = "tukey")
+```
+
+## Likelihood Ratio Tests
+
+```{r lmm-lrt}
+model.full <- lmer(
+  log.conc ~ type * time.hours +
+             type * temperature +
+             time.hours:temperature +
+             (1 | ID),
+  data = data,
+  REML = FALSE
+)
+
+model.no.type <- lmer(
+  log.conc ~ time.hours + temperature + time.hours:temperature + (1 | ID),
+  data = data, REML = FALSE
+)
+anova(model.no.type, model.full)
+
+model.no.time <- lmer(
+  log.conc ~ type + temperature + type:temperature + (1 | ID),
+  data = data, REML = FALSE
+)
+anova(model.no.time, model.full)
+
+model.no.temp <- lmer(
+  log.conc ~ type + time.hours + type:time.hours + (1 | ID),
+  data = data, REML = FALSE
+)
+anova(model.no.temp, model.full)
+
+model.no.typetime <- lmer(
+  log.conc ~ type + time.hours + temperature +
+             type:temperature + time.hours:temperature +
+             (1 | ID),
+  data = data, REML = FALSE
+)
+anova(model.no.typetime, model.full)
+```
+
+## Sensitivity: Random Slope for Type
+
+```{r lmm-random-slope}
+model.slope <- lmer(
+  log.conc ~ type * time.hours + type * temperature +
+             time.hours:temperature + (0 + type | ID),
+  data = data, REML = TRUE,
+  control = lmerControl(check.nobs.vs.nRE = "ignore")
+)
+
+anova(model.slope, ddf = "Kenward-Roger")
+pairs(emmeans(model.slope, ~ type))
+AIC(model, model.slope)
+```
+
+## Per-Type Linear Models
+
+```{r per-type-lms}
+data.filter.only <- data %>% filter(type == "filter")
+data.tissue.only <- data %>% filter(type == "tissue")
+
+model.filter <- lm(log.conc ~ time.hours * temperature, data = data.filter.only)
+summary(model.filter)
+
+model.tissue <- lm(log.conc ~ time.hours * temperature, data = data.tissue.only)
+summary(model.tissue)
+```
+
+## Figure 1: Filter vs Tissue DNA Yield
+
+```{r figure-1a, fig.width = 7, fig.height = 7}
+filter.log <- data$log.conc[data$type == "filter"]
+tissue.log <- data$log.conc[data$type == "tissue"]
+ttest.log <- t.test(filter.log, tissue.log, paired = TRUE)
+pval.label <- ifelse(ttest.log$p.value < 0.001,
+                     paste0("p = ", formatC(ttest.log$p.value, format = "e", digits = 1)),
+                     paste0("p = ", round(ttest.log$p.value, 4)))
+
+fig1a <- ggboxplot(data, x = "type", y = "concentration",
+                   fill = "type", palette = c("#00A08A", "#F2635F"),
+                   add = "jitter", outlier.shape = NA) +
+  scale_y_log10(labels = label_number(),
+                breaks = c(0.1, 1, 10, 100, 1000),
+                limits = c(0.08, 3000)) +
+  annotate("text", x = 1.5, y = 2200,
+           label = paste("Paired t-test (log10):", pval.label),
+           size = 5.5, fontface = "bold") +
+  labs(x = NULL, y = "DNA Concentration (ng/µL)") +
+  theme_classic(base_size = 18) +
+  theme(legend.position = "none",
+        axis.title.y = element_text(face = "bold", size = 20,
+                                    margin = margin(r = 8)),
+        axis.text    = element_text(face = "bold", color = "black", size = 18),
+        axis.line    = element_line(linewidth = 0.4, color = "black"),
+        plot.margin  = margin(15, 20, 15, 15))
+
+print(fig1a)
+ggsave(file.path(fig.dir, "Figure_1a.png"), fig1a,
+       width = 7, height = 7, dpi = 300, bg = "white")
+ggsave(file.path(fig.dir, "Figure_1a.pdf"), fig1a,
+       width = 7, height = 7, device = cairo_pdf, bg = "white")
+```
+
+```{r figure-1b, fig.width = 7, fig.height = 7}
+fig1b <- ggpaired(data, x = "type", y = "concentration", id = "ID",
+                  color = "type", line.color = "grey60", line.size = 0.4,
+                  palette = c("#00A08A", "#F2635F"), point.size = 2.5) +
+  scale_y_log10(labels = label_number(),
+                breaks = c(0.1, 1, 10, 100, 1000),
+                limits = c(0.08, 3000)) +
+  labs(x = NULL, y = "DNA Concentration (ng/µL)") +
+  theme_classic(base_size = 18) +
+  theme(legend.position = "none",
+        axis.title.y = element_text(face = "bold", size = 20,
+                                    color = "transparent",
+                                    margin = margin(r = 8)),
+        axis.text    = element_text(face = "bold", color = "black", size = 18),
+        axis.line    = element_line(linewidth = 0.4, color = "black"),
+        plot.margin  = margin(15, 20, 15, 15))
+
+print(fig1b)
+ggsave(file.path(fig.dir, "Figure_1b.png"), fig1b,
+       width = 7, height = 7, dpi = 300, bg = "white")
+ggsave(file.path(fig.dir, "Figure_1b.pdf"), fig1b,
+       width = 7, height = 7, device = cairo_pdf, bg = "white")
+```
+
+```{r figure-1-grid}
+img_a <- image_read(file.path(fig.dir, "Figure_1a.png"))
+img_b <- image_read(file.path(fig.dir, "Figure_1b.png"))
+
+target_h <- max(image_info(img_a)$height, image_info(img_b)$height)
+
+img_a <- image_resize(img_a, paste0("x", target_h))
+img_b <- image_resize(img_b, paste0("x", target_h))
+
+img_a <- image_annotate(img_a, "A", location = "+40+20", size = 120,
+                        weight = 700, color = "black")
+img_b <- image_annotate(img_b, "B", location = "+40+20", size = 120,
+                        weight = 700, color = "black")
+
+fig1 <- image_append(c(img_a, img_b), stack = FALSE)
+
+image_write(fig1, file.path(fig.dir, "Figure_1.png"), format = "png")
+image_write(fig1, file.path(fig.dir, "Figure_1.pdf"), format = "pdf")
+
+fig1
+```
+
+## Figure 2: DNA Yield Over Storage Time
+
+```{r figure-2, fig.width = 10, fig.height = 5.5}
+fig2 <- ggplot(data, aes(x = time.hours, y = concentration,
+                         color = temperature, fill = temperature)) +
+  geom_smooth(method = "lm", alpha = 0.18, linewidth = 0.9, se = TRUE) +
+  geom_point(shape = 21, color = "white", stroke = 0.4,
+             size = 2.8, alpha = 0.95) +
+  facet_wrap(~ type, labeller = as_labeller(
+    c(filter = "Filter Extraction", tissue = "Tissue Extraction"))) +
+  stat_poly_eq(data = ~ filter(.x, type == "filter"),
+               aes(group = temperature, color = temperature,
+                   label = paste(after_stat(rr.label),
+                                 after_stat(p.value.label), sep = "*\", \"*")),
+               formula = y ~ x,
+               label.x = "left", label.y = c(0.97, 0.87),
+               size = 3.6, parse = TRUE, label.size = NA) +
+  stat_poly_eq(data = ~ filter(.x, type == "tissue"),
+               aes(group = temperature, color = temperature,
+                   label = paste(after_stat(rr.label),
+                                 after_stat(p.value.label), sep = "*\", \"*")),
+               formula = y ~ x,
+               label.x = "left", label.y = c(0.12, 0.04),
+               size = 3.6, parse = TRUE, label.size = NA) +
+  scale_color_manual(values = c(room = "#D55E00", fridge = "#0072B2"),
+                     labels = c("Room", "Fridge"),
+                     name = "Temperature Treatment") +
+  scale_fill_manual(values = c(room = "#D55E00", fridge = "#0072B2"),
+                    labels = c("Room", "Fridge"),
+                    name = "Temperature Treatment") +
+  scale_y_log10(labels = label_number(),
+                breaks = c(0.1, 1, 10, 100, 1000)) +
+  scale_x_continuous(breaks = c(24, 72, 168, 336, 672),
+                     labels = c("24", "72", "168", "336", "672")) +
+  labs(x = "Duration of fixation (hours)",
+       y = "DNA Concentration (ng/µL)") +
+  theme_pubr() +
+  theme(strip.background = element_rect(fill = "grey95", color = "grey60", linewidth = 0.4),
+        strip.text = element_text(face = "bold", size = 12),
+        legend.position = "top",
+        legend.title = element_text(face = "bold"),
+        axis.title = element_text(face = "bold"),
+        panel.border = element_rect(color = "grey60", fill = NA, linewidth = 0.4))
+
+print(fig2)
+
+ggsave(file.path(fig.dir, "Figure_2.png"), fig2,
+       width = 10, height = 5.5, dpi = 300, bg = "white")
+ggsave(file.path(fig.dir, "Figure_2.pdf"), fig2,
+       width = 10, height = 5.5, device = cairo_pdf, bg = "white")
+```
+
+# Analysis 2: Fish Weight Loss Predicts Filter DNA Yield
+
+```{r weightloss-fit}
+data.filter.complete <- data.filter %>% filter(!is.na(fishweightloss))
+nrow(data.filter.complete)
+
+model2 <- lm(concentration ~ fishweightloss, data = data.filter.complete)
+summary(model2)
+
+model2b <- lm(concentration ~ percentage, data = data.filter.complete)
+summary(model2b)
+```
+
+## Figure 3: Weight Loss vs Filter DNA Yield
+
+```{r figure-3, fig.width = 7.5, fig.height = 5.5}
+fig3 <- ggplot(data.filter.complete,
+               aes(x = fishweightloss, y = concentration)) +
+  geom_smooth(method = "lm", color = "grey20", fill = "grey75",
+              alpha = 0.25, linewidth = 0.9) +
+  geom_point(aes(fill = labels, shape = labels),
+             color = "white", stroke = 0.4, size = 3.2, alpha = 0.95) +
+  stat_poly_eq(aes(label = paste(after_stat(rr.label),
+                                 after_stat(p.value.label), sep = "*\", \"*")),
+               formula = y ~ x,
+               label.x = "left", label.y = 0.97,
+               size = 4, parse = TRUE, label.size = NA, color = "grey20") +
+  scale_fill_manual(name = "Fish weight",
+    values = c("1" = "#BDD7E7", "2" = "#6BAED6",
+               "3" = "#3182BD", "4" = "#08519C"),
+    labels = c("2-4 g", "4-6 g", "6-8 g", "8-10 g")) +
+  scale_shape_manual(name = "Fish weight",
+    values = c("1" = 21, "2" = 22, "3" = 23, "4" = 24),
+    labels = c("2-4 g", "4-6 g", "6-8 g", "8-10 g")) +
+  labs(x = "Weight loss during fixation (g)",
+       y = "Filter DNA yield (ng/µL)") +
+  theme_pubr() +
+  theme(legend.position = "top",
+        legend.title = element_text(face = "bold"),
+        axis.title = element_text(face = "bold"),
+        panel.border = element_rect(color = "grey60", fill = NA, linewidth = 0.4))
+
+print(fig3)
+
+ggsave(file.path(fig.dir, "Figure_3.png"), fig3,
+       width = 7.5, height = 5.5, dpi = 300, bg = "white")
+ggsave(file.path(fig.dir, "Figure_3.pdf"), fig3,
+       width = 7.5, height = 5.5, device = cairo_pdf, bg = "white")
+ggsave(file.path(fig.dir, "Figure_3.tiff"), fig3,
+       width = 7.5, height = 5.5, dpi = 300, bg = "white", compression = "lzw")
+```
+
+# Analysis 3: Initial Fish Weight Predicts Weight Loss
+
+```{r weight-fit}
+data.weight <- data.filter %>% filter(!is.na(fishweightloss))
+nrow(data.weight)
+
+model3 <- lm(fishweightloss ~ fishweight, data = data.weight)
+summary(model3)
+confint(model3)
+
+model3b <- lm(percentage ~ fishweight, data = data.weight)
+summary(model3b)
+confint(model3b)
+```
+
+## Figure 4: Initial Weight vs Weight Loss
+
+```{r figure-4a, fig.width = 6.5, fig.height = 6}
+fig4a <- ggplot(data.weight, aes(x = fishweight, y = fishweightloss)) +
+  geom_smooth(method = "lm", color = "grey20", fill = "grey75",
+              alpha = 0.25, linewidth = 0.9) +
+  geom_point(aes(fill = temperature), shape = 21, color = "white",
+             stroke = 0.4, size = 3.2, alpha = 0.95) +
+  stat_poly_eq(aes(label = paste(after_stat(rr.label),
+                                 after_stat(p.value.label), sep = "*\", \"*")),
+               formula = y ~ x,
+               label.x = "left", label.y = 0.97,
+               size = 4, parse = TRUE, label.size = NA, color = "grey20") +
+  scale_fill_manual(values = c(room = "#D55E00", fridge = "#0072B2"),
+                    labels = c("Room", "Fridge"),
+                    name = "Temperature Treatment") +
+  labs(x = "Initial fish weight (g)",
+       y = "Weight loss during fixation (g)") +
+  theme_pubr() +
+  theme(legend.position = "top",
+        legend.title = element_text(face = "bold"),
+        axis.title = element_text(face = "bold"),
+        panel.border = element_rect(color = "grey60", fill = NA, linewidth = 0.4))
+
+print(fig4a)
+ggsave(file.path(fig.dir, "Figure_4a.png"), fig4a,
+       width = 6.5, height = 6, dpi = 300, bg = "white")
+ggsave(file.path(fig.dir, "Figure_4a.pdf"), fig4a,
+       width = 6.5, height = 6, device = cairo_pdf, bg = "white")
+```
+
+```{r figure-4b, fig.width = 6.5, fig.height = 6}
+fig4b <- ggplot(data.weight, aes(x = fishweight, y = percentage)) +
+  geom_smooth(method = "lm", color = "grey20", fill = "grey75",
+              alpha = 0.25, linewidth = 0.9) +
+  geom_point(aes(fill = temperature), shape = 21, color = "white",
+             stroke = 0.4, size = 3.2, alpha = 0.95) +
+  stat_poly_eq(aes(label = paste(after_stat(rr.label),
+                                 after_stat(p.value.label), sep = "*\", \"*")),
+               formula = y ~ x,
+               label.x = "left", label.y = 0.97,
+               size = 4, parse = TRUE, label.size = NA, color = "grey20") +
+  scale_fill_manual(values = c(room = "#D55E00", fridge = "#0072B2"),
+                    labels = c("Room", "Fridge"),
+                    name = "Temperature Treatment") +
+  labs(x = "Initial fish weight (g)",
+       y = "Percentage weight loss (%)") +
+  theme_pubr() +
+  theme(legend.position = "top",
+        legend.title = element_text(face = "bold"),
+        axis.title = element_text(face = "bold"),
+        panel.border = element_rect(color = "grey60", fill = NA, linewidth = 0.4))
+
+print(fig4b)
+ggsave(file.path(fig.dir, "Figure_4b.png"), fig4b,
+       width = 6.5, height = 6, dpi = 300, bg = "white")
+ggsave(file.path(fig.dir, "Figure_4b.pdf"), fig4b,
+       width = 6.5, height = 6, device = cairo_pdf, bg = "white")
+```
+
+```{r figure-4-grid}
+img_a <- image_read(file.path(fig.dir, "Figure_4a.png"))
+img_b <- image_read(file.path(fig.dir, "Figure_4b.png"))
+
+target_h <- max(image_info(img_a)$height, image_info(img_b)$height)
+
+img_a <- image_resize(img_a, paste0("x", target_h))
+img_b <- image_resize(img_b, paste0("x", target_h))
+
+img_a <- image_annotate(img_a, "A", location = "+40+20", size = 110,
+                        weight = 700, color = "black")
+img_b <- image_annotate(img_b, "B", location = "+40+20", size = 110,
+                        weight = 700, color = "black")
+
+fig4 <- image_append(c(img_a, img_b), stack = FALSE)
+
+image_write(fig4, file.path(fig.dir, "Figure_4.png"), format = "png")
+image_write(fig4, file.path(fig.dir, "Figure_4.pdf"), format = "pdf")
+image_write(fig4, file.path(fig.dir, "Figure_4.tiff"), format = "tiff")
+
+fig4
+```
