@@ -2,13 +2,12 @@
 
 Data and R code for the statistical analysis. Everything runs from
 [`Stat.Analysis.Rmd`](Stat.Analysis.Rmd); the knitted version with all output and
-figures is [`Stat.Analysis.md`](Stat.Analysis.md), which is the one to read on
-GitHub.
+figures is [`Stat.Analysis.md`](Stat.Analysis.md).
 
 ## Data
 
 `Supplementary table 1.xlsx` is the master sheet, one row per fish and 40 in all.
-It carries weight and length before and after fixation, tube numbers, and the
+It has weight and length before and after fixation, tube numbers, and the
 Qubit readings for both tissue and filter. The three `.txt` files are extracts
 from it, and those are what the analysis reads.
 
@@ -18,10 +17,10 @@ fridge. Concentrations are ng/uL and `ID` pairs the two rows for each fish.
 
 `data_filter.txt` is the 40 filter extractions with the fish weights attached,
 lifted column for column off the master sheet. The `labels` column bins fish into
-2-4, 4-6, 6-8 and 8-10 g. Two things to know about it. Its `type` column reads
-"tissue" on every row even though the values are the filter measurements, and ten
-fish have no weight-loss data, blank in the master sheet as well. IDs are numbered
-separately in each file, so the two files do not join on `ID`.
+2-4, 4-6, 6-8 and 8-10 g. Its `type` column reads "tissue" on every row even
+though the values are the filter measurements, and ten fish have no weight-loss
+data, blank in the master sheet as well. IDs are numbered separately in each
+file, so the two files do not join on `ID`.
 
 `data_paired_norm.txt` is the tissue values normalized by fin clip weight, kept for
 reference but not used.
@@ -47,6 +46,6 @@ install.packages(c(
 rmarkdown::render("Stat.Analysis.Rmd", output_format = "github_document")
 ```
 
-Paths are relative to the repository root, so it runs anywhere. `Stat.Analysis.md`
-and the `figure-gfm` folder are both generated, so edit the `.Rmd` rather than
-either of those. Run with R 4.6.1 and pandoc 3.8.3.
+Paths are relative to the repository root. `Stat.Analysis.md` and the
+`figure-gfm` folder are both generated, so edit the `.Rmd` rather than either of
+those. Run with R 4.6.1 and pandoc 3.8.3.
